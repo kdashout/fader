@@ -32,6 +32,12 @@ final class ProcessTap: @unchecked Sendable {
     /// Computed from the device sample rate in activate(); the render never
     /// runs before that, so the placeholder is inert.
     private nonisolated(unsafe) var _rampCoefficient: Float = 0
+    /// Where the tap's buffers start in the IO proc's input list. The
+    /// aggregate lists its sub-devices' own input streams first (an audio
+    /// interface's mic inputs, say) and the tap after them, so on such a
+    /// device buffer 0 is the interface's input, not the app. Set in
+    /// activate() before the IO proc starts. RT thread reads only.
+    private nonisolated(unsafe) var _tapInputIndex = 0
 
     var tapID = AudioObjectID.unknown
     var aggregateID = AudioObjectID.unknown
@@ -136,6 +142,7 @@ final class ProcessTap: @unchecked Sendable {
             holdSilent()
             return
         }
+        _tapInputIndex = Self.inputStreamCount(of: outputs)
 
         var proc: AudioDeviceIOProcID?
         try checked(
@@ -174,6 +181,17 @@ final class ProcessTap: @unchecked Sendable {
         }
         _rampCoefficient = 1 - exp(-1 / (Float(format.mSampleRate) * 0.030))
         return true
+    }
+
+    /// Input streams the output devices bring into the aggregate ahead of the tap.
+    @MainActor
+    private static func inputStreamCount(of outputs: [Output]) -> Int {
+        outputs.reduce(0) { count, output in
+            let streams = try? output.id.readArray(kAudioDevicePropertyStreams,
+                                                   scope: kAudioDevicePropertyScopeInput,
+                                                   of: AudioStreamID.self)
+            return count + (streams?.count ?? 0)
+        }
     }
 
     /// Whether the private aggregate still exists HAL-side. Device churn can
@@ -232,10 +250,12 @@ final class ProcessTap: @unchecked Sendable {
         let targetGain = VolumeTaper.gain(position: _volume)
         var gain = _currentGain
         let ramp = _rampCoefficient
+        let tapIndex = _tapInputIndex
 
         for (index, outBuffer) in outputs.enumerated() {
             guard let outData = outBuffer.mData else { continue }
-            guard index < inputs.count, let inData = inputs[index].mData else {
+            let source = tapIndex + index
+            guard source < inputs.count, let inData = inputs[source].mData else {
                 memset(outData, 0, Int(outBuffer.mDataByteSize))
                 continue
             }
@@ -243,8 +263,8 @@ final class ProcessTap: @unchecked Sendable {
             // a single interleaved buffer, so this is exact.
             gain = TapMix.mix(
                 input: inData.assumingMemoryBound(to: Float.self),
-                inputLayout: TapMix.Layout(channels: Int(inputs[index].mNumberChannels),
-                                           count: Int(inputs[index].mDataByteSize) / MemoryLayout<Float>.size),
+                inputLayout: TapMix.Layout(channels: Int(inputs[source].mNumberChannels),
+                                           count: Int(inputs[source].mDataByteSize) / MemoryLayout<Float>.size),
                 output: outData.assumingMemoryBound(to: Float.self),
                 outputLayout: TapMix.Layout(channels: Int(outBuffer.mNumberChannels),
                                             count: Int(outBuffer.mDataByteSize) / MemoryLayout<Float>.size),
