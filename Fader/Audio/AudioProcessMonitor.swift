@@ -16,6 +16,12 @@ final class AudioProcessMonitor {
     @ObservationIgnored private var listListener: HALListener?
     @ObservationIgnored private var pendingRefresh: Task<Void, Never>?
     @ObservationIgnored private var pollTask: Task<Void, Never>?
+    /// Process objects seen by the last refresh; a listener firing with one
+    /// outside this set means a process just appeared.
+    @ObservationIgnored private var knownObjectIDs: Set<AudioObjectID> = []
+    /// Bundle IDs listed even while silent, whatever their activation policy:
+    /// apps with a non-neutral volume, whose tap must exist before they play.
+    @ObservationIgnored var pinnedBundleIDs: Set<String> = []
 
     #if RENDER_SHOTS
         /// Render harness only: publish a demo app list without any HAL contact.
@@ -53,6 +59,7 @@ final class AudioProcessMonitor {
         pendingRefresh?.cancel()
         pendingRefresh = nil
         apps = []
+        knownObjectIDs = []
         installListListener()
         refresh()
     }
@@ -65,8 +72,25 @@ final class AudioProcessMonitor {
     private func installListListener() {
         // List changes (process appeared / exited) arrive as HAL notifications.
         listListener = AudioObjectID.system.listen(kAudioHardwarePropertyProcessObjectList) {
-            Task { @MainActor [weak self] in self?.scheduleRefresh() }
+            Task { @MainActor [weak self] in self?.handleListChange() }
         }
+    }
+
+    /// A process that just appeared is often about to play — a browser's new
+    /// media helper, a menu bar app's first sound. Its audio reaches the
+    /// speakers at full volume until its app's tap covers it, so a debounce
+    /// here is heard: refresh at once, then once more after the burst settles
+    /// (the new process may not resolve to its app on the first read).
+    private func handleListChange() {
+        guard let objectIDs = try? AudioObjectID.readProcessList(),
+              !knownObjectIDs.isSuperset(of: objectIDs)
+        else {
+            scheduleRefresh()
+            return
+        }
+        Self.logger.debug("Process appeared; refreshing now")
+        refresh()
+        scheduleRefresh()
     }
 
     /// Coalesces listener bursts: HAL fires once per process and once per
@@ -85,6 +109,7 @@ final class AudioProcessMonitor {
             Self.logger.error("Failed to read HAL process list")
             return
         }
+        knownObjectIDs = Set(objectIDs)
 
         struct Group {
             let app: NSRunningApplication
@@ -117,8 +142,10 @@ final class AudioProcessMonitor {
         var nextApps = groups.compactMap { pid, group -> AudioApp? in
             // Regular apps always; agents and helpers only while they actually
             // play or record — keeps Control Center, Siri, and GPU helpers out
-            // without dropping background recorders (meeting helpers).
+            // without dropping background recorders (meeting helpers). Agents
+            // the user turned down stay listed so their tap precedes their sound.
             guard group.app.activationPolicy == .regular || group.playing || group.recording
+                || pinnedBundleIDs.contains(group.app.bundleIdentifier ?? "")
             else { return nil }
             return AudioApp(
                 id: pid,

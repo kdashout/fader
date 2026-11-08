@@ -26,7 +26,13 @@ final class MixerEngine {
     /// state while the audio system is unreachable.
     private(set) var isStarted = false
 
-    private(set) var volumes: [String: AppVolume] = [:]
+    private(set) var volumes: [String: AppVolume] = [:] {
+        didSet {
+            // Apps the user turned down are listed as soon as they have an
+            // audio process, so their tap is up before their first sound.
+            processMonitor.pinnedBundleIDs = Set(volumes.filter { !$0.value.isNeutral }.keys)
+        }
+    }
 
     @ObservationIgnored var taps: [String: ProcessTap] = [:]
     /// One volume control per pinned-and-present device, keyed by UID — each
