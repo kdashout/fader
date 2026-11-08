@@ -33,6 +33,9 @@ final class MixerEngine {
     /// routed output gets its own slider, like multi-output members.
     @ObservationIgnored private var routeVolumes: [String: DeviceVolumeController] = [:]
     @ObservationIgnored private let store = VolumeStore()
+    @ObservationIgnored private let globalMute = GlobalMute()
+    /// True while a `fader://mute-all` hold is in effect; new per-app taps start ducked.
+    var isAllMuted: Bool { globalMute.isMuted }
     @ObservationIgnored private var deviceListener: HALListener?
     @ObservationIgnored private var serviceRestartListener: HALListener?
     @ObservationIgnored private var saveTask: Task<Void, Never>?
@@ -96,6 +99,40 @@ final class MixerEngine {
         apply(entry, to: app)
     }
 
+    /// Runs a `fader://` command. An app that is not playing right now keeps
+    /// the new value, and its tap picks it up once the app makes sound.
+    func perform(_ command: ControlCommand) {
+        switch command {
+        case let .adjustVolume(bundleID, delta):
+            var entry = volumes[bundleID] ?? AppVolume()
+            entry.volume = ControlCommand.nudged(entry.volume, by: delta)
+            apply(entry, toBundleID: bundleID)
+        case let .setVolume(bundleID, position):
+            var entry = volumes[bundleID] ?? AppVolume()
+            entry.volume = max(0, min(1, position))
+            apply(entry, toBundleID: bundleID)
+        case let .toggleMute(bundleID):
+            var entry = volumes[bundleID] ?? AppVolume()
+            entry.isMuted.toggle()
+            apply(entry, toBundleID: bundleID)
+        case let .muteAll(muted):
+            for tap in taps.values {
+                tap.isDucked = muted
+            }
+            guard let outputs = try? resolvedOutputs(for: AppVolume()) else { return }
+            globalMute.setMuted(muted, outputs: outputs, excluding: taps.values.flatMap(\.processObjectIDs))
+        }
+    }
+
+    private func apply(_ entry: AppVolume, toBundleID bundleID: String) {
+        if let app = processMonitor.apps.first(where: { $0.bundleID == bundleID }) {
+            apply(entry, to: app)
+        } else {
+            volumes[bundleID] = entry.isNeutral ? nil : entry
+            scheduleSave()
+        }
+    }
+
     /// Adds a device to the active outputs, building the multi-output route
     /// on the first pairing.
     func pair(_ device: AudioDevice) {
@@ -138,6 +175,7 @@ final class MixerEngine {
             tap.invalidate()
         }
         taps.removeAll()
+        globalMute.invalidate()
     }
 
     // MARK: - Private
@@ -147,6 +185,7 @@ final class MixerEngine {
             tap.invalidate()
         }
         taps.removeAll()
+        globalMute.invalidate()
         rebuildPending.removeAll()
         routeVolumes.removeAll()
     }

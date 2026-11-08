@@ -113,6 +113,7 @@ targets:
       - Fader/Audio/TapRebuildPolicy.swift
       - Fader/Audio/VolumeTaper.swift
       - Fader/Audio/TapMix.swift
+      - Fader/Audio/ControlCommand.swift
       # Property wrappers and AudioDirection; nothing in the tests touches
       # a live HAL.
       - Fader/Audio/HALProperty.swift

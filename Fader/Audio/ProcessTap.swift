@@ -26,6 +26,9 @@ final class ProcessTap: @unchecked Sendable {
     private nonisolated(unsafe) var _volume: Float
     /// Mute flag. Read by the RT thread every buffer.
     private nonisolated(unsafe) var _isMuted: Bool
+    /// Fades the output to silence while every app is muted at once (see
+    /// GlobalMute), over the same ramp as a volume change. Read by the RT thread.
+    private nonisolated(unsafe) var _isDucked = false
     /// Gain ramped towards `_volume` per frame to avoid clicks. RT thread only.
     private nonisolated(unsafe) var _currentGain: Float
     /// Per-frame ramp coefficient for ~30 ms exponential gain smoothing.
@@ -48,6 +51,8 @@ final class ProcessTap: @unchecked Sendable {
     private let ioQueue = DispatchQueue(label: "dev.pantafive.fader.io", qos: .userInitiated)
 
     let processObjectIDs: [AudioObjectID]
+    /// Set for a global tap: every process except these. Nil taps `processObjectIDs`.
+    let excludedProcessObjectIDs: [AudioObjectID]?
     @MainActor var isSuspended = false
     @MainActor var isHeld = false
     @MainActor var onOutputResumed: (@MainActor @Sendable () -> Void)?
@@ -79,12 +84,28 @@ final class ProcessTap: @unchecked Sendable {
         set { _isMuted = newValue }
     }
 
+    var isDucked: Bool {
+        get { _isDucked }
+        set { _isDucked = newValue }
+    }
+
     init(processObjectIDs: [AudioObjectID], volume: Float = 1.0, isMuted: Bool = false) {
         Self.configureHALPowerPolicy()
         self.processObjectIDs = processObjectIDs
+        excludedProcessObjectIDs = nil
         _volume = volume
         _isMuted = isMuted
         _currentGain = VolumeTaper.gain(position: volume)
+    }
+
+    /// A tap on every process except `excluding`, for fading all audio at once.
+    init(allProcessesExcluding excluding: [AudioObjectID]) {
+        Self.configureHALPowerPolicy()
+        processObjectIDs = []
+        excludedProcessObjectIDs = excluding
+        _volume = 1.0
+        _isMuted = false
+        _currentGain = 1.0
     }
 
     /// Crossfades with the tap being replaced: that one ramps to zero while
@@ -103,7 +124,8 @@ final class ProcessTap: @unchecked Sendable {
         guard !aggregateID.isValid, let clockUID = outputs.first?.uid else { return }
         activatedOutputs = outputs
 
-        let description = CATapDescription(stereoMixdownOfProcesses: processObjectIDs)
+        let description = excludedProcessObjectIDs.map { CATapDescription(stereoGlobalTapButExcludeProcesses: $0) }
+            ?? CATapDescription(stereoMixdownOfProcesses: processObjectIDs)
         description.uuid = UUID()
         description.muteBehavior = .mutedWhenTapped
         description.isPrivate = true
@@ -247,7 +269,7 @@ final class ProcessTap: @unchecked Sendable {
 
         let inputs = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: input))
         let outputs = UnsafeMutableAudioBufferListPointer(output)
-        let targetGain = VolumeTaper.gain(position: _volume)
+        let targetGain = _isDucked ? 0 : VolumeTaper.gain(position: _volume)
         var gain = _currentGain
         let ramp = _rampCoefficient
         let tapIndex = _tapInputIndex

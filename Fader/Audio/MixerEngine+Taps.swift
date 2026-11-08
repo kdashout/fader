@@ -19,6 +19,7 @@ extension MixerEngine {
             isMuted: routed ? false : entry.isMuted
         )
         if old != nil { tap.rampInFromSilence() }
+        tap.isDucked = isAllMuted
         do {
             try tap.activate(outputs: outputs)
         } catch {

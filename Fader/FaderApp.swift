@@ -25,6 +25,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         ProcessInfo.processInfo.disableAutomaticTermination("Menu bar agent stays resident")
     }
 
+    /// `fader://` commands (see ControlCommand) from a keyboard knob or a script.
+    func application(_ application: NSApplication, open urls: [URL]) {
+        for url in urls {
+            guard let command = ControlCommand(url: url) else { continue }
+            Self.engine?.perform(command)
+        }
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
         let isUpdateRelaunch = UpdateController.consumeRelaunchingForUpdate()
         // Process taps are private to this process and must always be faded and
