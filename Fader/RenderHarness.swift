@@ -170,7 +170,7 @@
             // A partial level, not neutral 100%: a maxed slider is an all-white
             // fill that vanishes on the light render background, and a set level
             // shows the per-app feature better anyway.
-            engine.seedForRender(volumes: ["com.spotify.client": AppVolume(volume: 0.65)])
+            engine.seedForRender(volumes: ["com.spotify.client": AppVolume(volume: 0.65, throughFader: true)])
             return engine
         }
 
@@ -189,7 +189,7 @@
             engine.processMonitor.seedForRender(apps: [
                 app(701, "com.spotify.client", "Spotify", playing: true),
             ])
-            engine.seedForRender(volumes: ["com.spotify.client": AppVolume(volume: 0.65)])
+            engine.seedForRender(volumes: ["com.spotify.client": AppVolume(volume: 0.65, throughFader: true)])
             return engine
         }
 
@@ -224,7 +224,7 @@
             ])
             engine.seedForRender(
                 volumes: [
-                    "com.spotify.client": AppVolume(outputDeviceUIDs: [speakers.uid, airpods4.uid]),
+                    "com.spotify.client": AppVolume(outputDeviceUIDs: [speakers.uid, airpods4.uid], throughFader: true),
                 ],
                 routeVolumes: [
                     speakers.uid: DeviceVolumeController(renderVolume: 0.8),
@@ -280,7 +280,7 @@
             engine.processMonitor.seedForRender(apps: [
                 app(704, "com.spotify.client", "Spotify", playing: true),
             ])
-            engine.seedForRender(volumes: ["com.spotify.client": AppVolume(volume: 0.35)])
+            engine.seedForRender(volumes: ["com.spotify.client": AppVolume(volume: 0.35, throughFader: true)])
             return engine
         }
 

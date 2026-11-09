@@ -57,6 +57,28 @@ struct AppVolumeTests {
         #expect(!AppVolume(volume: 1.0, isMuted: false, outputDeviceUIDs: ["dev-uid"]).isNeutral)
     }
 
+    /// An app played through Fader keeps its tap at 100%, so its entry must
+    /// survive the save that drops neutral ones.
+    @Test("through Fader keeps a unity entry non-neutral")
+    func throughFaderIsNotNeutral() {
+        #expect(!AppVolume(volume: 1.0, isMuted: false, throughFader: true).isNeutral)
+    }
+
+    /// Entries saved before the choice existed were all tapped; decoding one
+    /// as bypassed would play that app at full volume on upgrade.
+    @Test("an entry saved before the choice existed stays through Fader")
+    func legacyEntryStaysThroughFader() throws {
+        let json = #"{"com.app":{"volume":0.8,"isMuted":false,"outputDeviceUIDs":[]}}"#
+        let decoded = try JSONDecoder().decode([String: AppVolume].self, from: Data(json.utf8))
+        #expect(decoded["com.app"]?.throughFader == true)
+    }
+
+    @Test("a new entry is bypassed by default")
+    func newEntryIsBypassed() {
+        #expect(!AppVolume().throughFader)
+        #expect(!AppVolume(volume: 0.5).throughFader)
+    }
+
     @Test("routed devices survive a save round-trip, order kept")
     func routedRoundTrips() throws {
         let defaults = try #require(UserDefaults(suiteName: #function))

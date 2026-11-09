@@ -20,7 +20,7 @@ final class AudioProcessMonitor {
     /// outside this set means a process just appeared.
     @ObservationIgnored private var knownObjectIDs: Set<AudioObjectID> = []
     /// Bundle IDs listed even while silent, whatever their activation policy:
-    /// apps with a non-neutral volume, whose tap must exist before they play.
+    /// apps played through Fader, whose tap must exist before they play.
     @ObservationIgnored var pinnedBundleIDs: Set<String> = []
 
     #if RENDER_SHOTS
@@ -88,7 +88,7 @@ final class AudioProcessMonitor {
             scheduleRefresh()
             return
         }
-        Self.logger.debug("Process appeared; refreshing now")
+        tapLifecycleLogger.notice("Process appeared; refreshing now")
         refresh()
         scheduleRefresh()
     }
@@ -143,7 +143,7 @@ final class AudioProcessMonitor {
             // Regular apps always; agents and helpers only while they actually
             // play or record — keeps Control Center, Siri, and GPU helpers out
             // without dropping background recorders (meeting helpers). Agents
-            // the user turned down stay listed so their tap precedes their sound.
+            // played through Fader stay listed so their tap precedes their sound.
             guard group.app.activationPolicy == .regular || group.playing || group.recording
                 || pinnedBundleIDs.contains(group.app.bundleIdentifier ?? "")
             else { return nil }

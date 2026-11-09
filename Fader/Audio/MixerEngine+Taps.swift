@@ -7,7 +7,10 @@ extension MixerEngine {
     /// silently dead tap would mute the app outright. Saved volumes survive
     /// and re-apply once multi-output dissolves.
     func makeTap(for app: AudioApp, entry: AppVolume, replacing old: ProcessTap?) throws -> ProcessTap? {
-        guard !multiOutput.isActive else { return nil }
+        guard !multiOutput.isActive else {
+            tapLifecycleLogger.notice("No tap for \(app.bundleID, privacy: .public): multi-output is active")
+            return nil
+        }
         let outputs = try resolvedOutputs(for: entry)
         // A routed app's loudness lives on its devices' own volume controls
         // (one slider per pinned device), so its tap renders transparent — the
@@ -18,6 +21,7 @@ extension MixerEngine {
             volume: routed ? 1.0 : entry.volume,
             isMuted: routed ? false : entry.isMuted
         )
+        tap.label = app.bundleID
         if old != nil { tap.rampInFromSilence() }
         tap.isDucked = isAllMuted
         do {
@@ -31,6 +35,10 @@ extension MixerEngine {
             throw HALError.operation(kAudioDeviceUnsupportedFormatError, "verify aggregate stream format")
         }
         let bundleID = app.bundleID
+        tapLifecycleLogger.notice("""
+            Tap up for \(bundleID, privacy: .public): \(app.objectIDs.count) processes, \
+            \(old == nil ? "new" : "replacing", privacy: .public)\(tap.isHeld ? ", held silent" : "", privacy: .public)
+            """)
         tap.onOutputResumed = { [weak self] in self?.processMonitor.refresh() }
         tap.onBroken = { [weak self] in self?.rebuildBrokenTap(bundleID) }
         tap.updatePlaybackState(isPlaying: app.isPlaying)
@@ -48,12 +56,15 @@ extension MixerEngine {
     }
 
     /// Releasing restores the app's native output at full volume.
-    func releaseTap(_ bundleID: String) {
-        taps.removeValue(forKey: bundleID)?.invalidate()
+    func releaseTap(_ bundleID: String, reason: String) {
         rebuildPending.remove(bundleID)
+        guard let tap = taps.removeValue(forKey: bundleID) else { return }
+        tapLifecycleLogger.notice("Released tap for \(bundleID, privacy: .public): \(reason, privacy: .public)")
+        tap.invalidate()
     }
 
     func rebuildBrokenTap(_ bundleID: String) {
+        tapLifecycleLogger.notice("Tap for \(bundleID, privacy: .public) broke; rebuilding")
         rebuildPending.insert(bundleID)
         syncTaps()
     }
@@ -64,6 +75,7 @@ extension MixerEngine {
         guard retryTask == nil else { return }
         tapFailures += 1
         let delay = TapRebuildPolicy.retryDelay(afterFailures: tapFailures)
+        tapLifecycleLogger.notice("Retrying taps in \(String(describing: delay), privacy: .public) (failure \(self.tapFailures))")
         retryTask = Task { @MainActor [weak self] in
             try? await Task.sleep(for: delay)
             guard let self, !Task.isCancelled else { return }

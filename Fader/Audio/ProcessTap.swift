@@ -48,6 +48,8 @@ final class ProcessTap: @unchecked Sendable {
     var tapDescription: CATapDescription?
     var idleTask: Task<Void, Never>?
     var isProcessPlaying = true
+    /// The app this tap serves (its bundle ID), for TapLifecycle log lines.
+    var label = ""
     private let ioQueue = DispatchQueue(label: "dev.pantafive.fader.io", qos: .userInitiated)
 
     let processObjectIDs: [AudioObjectID]
@@ -231,6 +233,7 @@ final class ProcessTap: @unchecked Sendable {
     /// Releasing the tap restores the app's native output.
     @MainActor
     func invalidate() {
+        if tapID.isValid { tapLifecycleLogger.notice("Destroyed tap for \(self.label, privacy: .public)") }
         stopIdleLifecycle()
         Self.destroy(aggregateID: aggregateID, tapID: tapID, procID: procID)
         procID = nil

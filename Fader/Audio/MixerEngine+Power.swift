@@ -14,6 +14,7 @@ extension MixerEngine {
     }
 
     func recoverAfterWake() {
+        tapLifecycleLogger.notice("Resyncing audio state after wake or service restart")
         wakeResyncTask?.cancel()
         resyncAudioState()
         // Drivers and IOBluetooth often publish their final object IDs shortly

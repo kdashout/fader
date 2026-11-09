@@ -4,6 +4,13 @@ import Foundation
 import os
 
 extension ProcessTap {
+    /// `suspendIdleTaps` (default on) parks a tap's IO after 30 s of silence.
+    /// Off keeps every tap running — a little CPU while idle, in exchange for
+    /// no suspend/resume switch in front of the app's next sound.
+    static var suspendsWhenIdle: Bool {
+        UserDefaults.standard.object(forKey: "suspendIdleTaps") as? Bool ?? true
+    }
+
     /// Park long-idle IO without letting the process escape at full volume.
     /// `.muted` keeps native output silent while the aggregate is stopped; one
     /// shared lightweight watcher resumes IO as soon as the process runs again.
@@ -18,6 +25,7 @@ extension ProcessTap {
             if isSuspended { resumeIO() }
             return
         }
+        guard Self.suspendsWhenIdle else { return }
 
         idleTask = Task { @MainActor [weak self] in
             do {
@@ -65,10 +73,9 @@ extension ProcessTap {
             }
             isSuspended = true
             ProcessTapWakeMonitor.shared.watch(self)
-            let id = tapID
-            Self.logger.debug("Suspended idle tap \(id)")
+            tapLifecycleLogger.notice("Suspended idle tap for \(self.label, privacy: .public)")
         } catch {
-            Self.logger.error("Failed to suspend idle tap: \(error.localizedDescription)")
+            tapLifecycleLogger.error("Failed to suspend idle tap for \(self.label, privacy: .public): \(error.localizedDescription)")
         }
     }
 
@@ -88,11 +95,10 @@ extension ProcessTap {
                 // keep audio alive and report the HAL problem for diagnostics.
                 Self.logger.error("Failed to restore tap mute behavior: \(error.localizedDescription)")
             }
-            let id = tapID
-            Self.logger.debug("Resumed tap \(id)")
+            tapLifecycleLogger.notice("Resumed tap for \(self.label, privacy: .public)")
             onOutputResumed?()
         } catch {
-            Self.logger.error("Failed to resume tap: \(error.localizedDescription)")
+            tapLifecycleLogger.error("Failed to resume tap for \(self.label, privacy: .public): \(error.localizedDescription)")
             // Destroying the tap would restore native audio at full volume;
             // stay silent and let MixerEngine build a replacement.
             holdSilent()
@@ -102,6 +108,7 @@ extension ProcessTap {
 
     @MainActor
     func holdSilent() {
+        tapLifecycleLogger.notice("Holding tap for \(self.label, privacy: .public) silent")
         isHeld = true
         stopIdleLifecycle()
         do {

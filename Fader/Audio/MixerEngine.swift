@@ -4,8 +4,11 @@ import Observation
 import os
 
 /// The heart of Fader: binds the process list to per-app volume state and
-/// owns one ProcessTap per adjusted app. Apps at unity gain stay untouched —
-/// no tap, no processing, bit-perfect native playback.
+/// owns one ProcessTap per app played through Fader. Bypassed apps (the
+/// default) stay untouched — no tap, no processing, bit-perfect native
+/// playback. The choice is the user's, per app, and doesn't follow the
+/// slider: a tapped app keeps its tap at 100%, so it never flips between
+/// paths while it plays.
 @MainActor
 @Observable
 final class MixerEngine {
@@ -28,9 +31,9 @@ final class MixerEngine {
 
     private(set) var volumes: [String: AppVolume] = [:] {
         didSet {
-            // Apps the user turned down are listed as soon as they have an
+            // Apps played through Fader are listed as soon as they have an
             // audio process, so their tap is up before their first sound.
-            processMonitor.pinnedBundleIDs = Set(volumes.filter { !$0.value.isNeutral }.keys)
+            processMonitor.pinnedBundleIDs = Set(volumes.filter(\.value.throughFader).keys)
         }
     }
 
@@ -48,7 +51,6 @@ final class MixerEngine {
     @ObservationIgnored var rebuildPending: Set<String> = []
     @ObservationIgnored var tapFailures = 0
     @ObservationIgnored var retryTask: Task<Void, Never>?
-    @ObservationIgnored private var neutralTeardownTasks: [String: Task<Void, Never>] = [:]
     @ObservationIgnored var routingTask: Task<Void, Never>?
     @ObservationIgnored var bluetoothRefreshTask: Task<Void, Never>?
     @ObservationIgnored var wakeResyncTask: Task<Void, Never>?
@@ -68,6 +70,7 @@ final class MixerEngine {
 
     func start() {
         volumes = store.load()
+        tapLifecycleLogger.notice("Started with saved volumes for \(self.volumes.count) apps")
         processMonitor.start()
         systemVolume.start()
         deviceMonitor.start()
@@ -102,6 +105,14 @@ final class MixerEngine {
     func toggleMute(for app: AudioApp) {
         var entry = volumes[app.bundleID] ?? AppVolume()
         entry.isMuted.toggle()
+        apply(entry, to: app)
+    }
+
+    /// Puts an app's audio through Fader (tapped from now on, at any volume)
+    /// or back on its native path.
+    func setThroughFader(_ on: Bool, for app: AudioApp) {
+        var entry = volumes[app.bundleID] ?? AppVolume()
+        entry.throughFader = on
         apply(entry, to: app)
     }
 
@@ -150,11 +161,12 @@ final class MixerEngine {
         multiOutput.remove(device)
     }
 
-    /// Drops the tap for an app, restoring its native audio path.
+    /// Back to 100%, unmuted. A tapped app stays on Fader.
     func reset(_ app: AudioApp) {
-        volumes[app.bundleID] = nil
-        store.save(volumes)
-        releaseTap(app.bundleID)
+        var entry = volumes[app.bundleID] ?? AppVolume()
+        entry.volume = 1.0
+        entry.isMuted = false
+        apply(entry, to: app)
     }
 
     /// Smooths the volume jump when Fader exits. A tap mutes the app's native
@@ -166,6 +178,7 @@ final class MixerEngine {
     /// the level it is about to play, a smooth rise instead of a slam. Muted
     /// taps render silence and can't fade audibly, so they restore as-is.
     func fadeOutAndStop() {
+        tapLifecycleLogger.notice("Quitting; releasing \(self.taps.count) taps to native output")
         let fading = taps.values.filter { !$0.isMuted && $0.volume < 0.999 }
         if !fading.isEmpty {
             for tap in fading {
@@ -187,6 +200,7 @@ final class MixerEngine {
     // MARK: - Private
 
     func discardHALBoundState() {
+        tapLifecycleLogger.notice("Discarding \(self.taps.count) taps bound to the old audio service")
         for tap in taps.values {
             tap.invalidate()
         }
@@ -235,31 +249,21 @@ final class MixerEngine {
         }
     }
 
+    /// A bypassed app's volume and mute are kept but not applied. A tapped
+    /// app keeps its tap at 100% too — its audio then comes out of Fader's
+    /// process, so capture that excludes the app itself (Discord screen
+    /// share) picks it up; bypass the app to avoid that.
     private func apply(_ entry: AppVolume, to app: AudioApp) {
-        volumes[app.bundleID] = entry
+        volumes[app.bundleID] = entry.isNeutral ? nil : entry
         scheduleSave()
 
-        if let tap = taps[app.bundleID] {
+        if !entry.throughFader {
+            releaseTap(app.bundleID, reason: "bypassed")
+        } else if let tap = taps[app.bundleID] {
             tap.volume = entry.volume
             tap.isMuted = entry.isMuted
-            scheduleNeutralTeardown(for: app.bundleID)
-        } else if !entry.isNeutral {
+        } else {
             installTap(for: app, entry: entry)
-        }
-    }
-
-    /// Back at 100% the tap must go: the app's audio otherwise keeps coming
-    /// out of Fader's process, so capture that excludes the app itself
-    /// (Discord screen share) picks it up. Waits for the slider to settle.
-    private func scheduleNeutralTeardown(for bundleID: String) {
-        neutralTeardownTasks.removeValue(forKey: bundleID)?.cancel()
-        guard volumes[bundleID]?.isNeutral == true else { return }
-        neutralTeardownTasks[bundleID] = Task { @MainActor [weak self] in
-            try? await Task.sleep(for: .milliseconds(500))
-            guard !Task.isCancelled, let self, volumes[bundleID]?.isNeutral == true else { return }
-            neutralTeardownTasks[bundleID] = nil
-            volumes[bundleID] = nil
-            releaseTap(bundleID)
         }
     }
 
@@ -273,15 +277,15 @@ final class MixerEngine {
         }
     }
 
-    /// Ensures every non-neutral running app has a live tap covering its
-    /// current process set, and every gone app's tap is released.
+    /// Ensures every running app played through Fader has a live tap covering
+    /// its current process set, and every other tap is released.
     func syncTaps() {
         let apps = AudioApp.coalescedByBundleID(processMonitor.apps)
         let running = Dictionary(uniqueKeysWithValues: apps.map { ($0.bundleID, $0) })
 
         for (bundleID, tap) in taps {
-            guard let app = running[bundleID], let entry = volumes[bundleID] else {
-                releaseTap(bundleID)
+            guard let app = running[bundleID], let entry = volumes[bundleID], entry.throughFader else {
+                releaseTap(bundleID, reason: running[bundleID] == nil ? "app left the audio process list" : "bypassed")
                 continue
             }
             // A browser that spawns a new media child needs the tap rebuilt —
@@ -292,11 +296,21 @@ final class MixerEngine {
                 tap.updatePlaybackState(isPlaying: app.isPlaying)
             }
         }
-        for (bundleID, entry) in volumes where !entry.isNeutral {
+        for (bundleID, entry) in volumes where entry.throughFader {
             guard taps[bundleID] == nil, let app = running[bundleID] else { continue }
             installTap(for: app, entry: entry)
         }
         syncRouteVolumes()
+        logUnprotectedPlayback(apps)
+    }
+
+    /// An app played through Fader with no tap is heard at full volume — the
+    /// jump itself. Logged on every sync it persists through.
+    private func logUnprotectedPlayback(_ apps: [AudioApp]) {
+        for app in apps where app.isPlaying {
+            guard let entry = volumes[app.bundleID], entry.throughFader, taps[app.bundleID] == nil else { continue }
+            tapLifecycleLogger.warning("Unprotected: \(app.bundleID, privacy: .public) plays at full volume with no tap")
+        }
     }
 
     /// Keeps one DeviceVolumeController alive per pinned-and-present device,
@@ -321,7 +335,7 @@ final class MixerEngine {
         let old = taps[bundleID]
         do {
             guard let tap = try makeTap(for: app, entry: entry, replacing: old) else {
-                releaseTap(bundleID)
+                releaseTap(bundleID, reason: "multi-output is active")
                 return
             }
             taps[bundleID] = tap
@@ -361,16 +375,19 @@ final class MixerEngine {
     func reconcileTapRouting() {
         for (bundleID, tap) in taps {
             guard let entry = volumes[bundleID] else { continue }
-            if let desired = try? resolvedOutputs(for: entry),
-               desired == tap.activatedOutputs, tap.isAlive { continue }
+            let desired = try? resolvedOutputs(for: entry)
+            let alive = tap.isAlive
+            if let desired, desired == tap.activatedOutputs, alive { continue }
+            let why = desired == nil ? "outputs unresolved" : alive ? "outputs changed" : "aggregate died"
+            tapLifecycleLogger.notice("Rebuilding tap for \(bundleID, privacy: .public): \(why, privacy: .public)")
             rebuildPending.insert(bundleID)
         }
         syncTaps()
     }
 
     private func rebuildTap(for app: AudioApp, entry: AppVolume) {
-        if entry.isNeutral {
-            releaseTap(app.bundleID)
+        if !entry.throughFader {
+            releaseTap(app.bundleID, reason: "bypassed")
         } else {
             installTap(for: app, entry: entry)
         }
@@ -397,12 +414,13 @@ extension MixerEngine {
     }
 
     /// Pins an app's audio to another output device, on top of any already
-    /// pinned. Routing forces a tap even at unity gain (the tap IS the route),
-    /// so the tap is rebuilt to fan its aggregate out to the new device set.
+    /// pinned. The tap IS the route, so routing puts a bypassed app through
+    /// Fader, and the tap is rebuilt to fan its aggregate out to the new set.
     func route(_ app: AudioApp, to device: AudioDevice) {
         var entry = volumes[app.bundleID] ?? AppVolume()
         guard !entry.outputDeviceUIDs.contains(device.uid) else { return }
         entry.outputDeviceUIDs.append(device.uid)
+        entry.throughFader = true
         volumes[app.bundleID] = entry
         scheduleSave()
         rebuildTap(for: app, entry: entry)

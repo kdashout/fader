@@ -8,19 +8,25 @@ struct AppVolume: Codable, Equatable {
     /// follow the system default. A pinned app always needs a tap (the tap IS
     /// the route), so a non-empty list is never neutral even at unity gain.
     var outputDeviceUIDs: [String] = []
+    /// The user chose to play this app through Fader. Only these apps get a
+    /// tap, and they keep it at any volume — 100% included — so the app never
+    /// switches between its native path and Fader's while it runs. Off (the
+    /// default) leaves the app's audio untouched; its slider does nothing.
+    var throughFader: Bool = false
 
-    /// Unity gain, unmuted, and following the default output — the app's audio
-    /// path does not need a tap.
-    var isNeutral: Bool { volume == 1.0 && !isMuted && outputDeviceUIDs.isEmpty }
+    /// Bypassed at unity gain, unmuted, and following the default output —
+    /// nothing worth saving.
+    var isNeutral: Bool { !throughFader && volume == 1.0 && !isMuted && outputDeviceUIDs.isEmpty }
 
-    init(volume: Float = 1.0, isMuted: Bool = false, outputDeviceUIDs: [String] = []) {
+    init(volume: Float = 1.0, isMuted: Bool = false, outputDeviceUIDs: [String] = [], throughFader: Bool = false) {
         self.volume = volume
         self.isMuted = isMuted
         self.outputDeviceUIDs = outputDeviceUIDs
+        self.throughFader = throughFader
     }
 
     private enum CodingKeys: String, CodingKey {
-        case volume, isMuted, outputDeviceUIDs, outputDeviceUID
+        case volume, isMuted, outputDeviceUIDs, outputDeviceUID, throughFader
     }
 
     /// Tolerates the pre-multi-route blob, which stored a single
@@ -37,6 +43,9 @@ struct AppVolume: Codable, Equatable {
         } else {
             outputDeviceUIDs = []
         }
+        // Before the choice existed only adjusted apps were saved, and every
+        // one of them was tapped — keep them on Fader.
+        throughFader = try container.decodeIfPresent(Bool.self, forKey: .throughFader) ?? true
     }
 
     func encode(to encoder: Encoder) throws {
@@ -44,6 +53,7 @@ struct AppVolume: Codable, Equatable {
         try container.encode(volume, forKey: .volume)
         try container.encode(isMuted, forKey: .isMuted)
         try container.encode(outputDeviceUIDs, forKey: .outputDeviceUIDs)
+        try container.encode(throughFader, forKey: .throughFader)
     }
 }
 

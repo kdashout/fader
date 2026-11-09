@@ -32,6 +32,9 @@ struct AppRowView: View {
         // ones — but the pinned-device card stays bright: on a paused app its
         // outputs are exactly what the user wants to see.
         let pausedDim: Double = app.isPlaying ? 1.0 : 0.5
+        // A bypassed app plays natively: its slider would do nothing, so it
+        // reads as off until the user puts the app through Fader.
+        let bypassDim: Double = entry.throughFader ? 1.0 : 0.35
 
         VStack(alignment: .leading, spacing: 5) {
             HStack(spacing: 6) {
@@ -45,11 +48,12 @@ struct AppRowView: View {
                 // A routed app's loudness lives on its per-device sliders, so
                 // the app-level percentage gives way to them.
                 if routeUIDs.isEmpty {
-                    Text(entry.isMuted ? "muted" : "\(Int(entry.volume * 100))%")
+                    Text(!entry.throughFader ? "bypass" : entry.isMuted ? "muted" : "\(Int(entry.volume * 100))%")
                         .font(.system(size: 11, weight: .regular, design: .monospaced))
                         .foregroundStyle(.secondary)
                         .contentTransition(.numericText())
                 }
+                throughFaderButton(entry)
             }
             .opacity(pausedDim)
 
@@ -63,7 +67,8 @@ struct AppRowView: View {
                     iconDimmed: entry.isMuted,
                     onIconTap: { engine.toggleMute(for: app) }
                 )
-                .opacity((entry.isMuted ? 0.55 : 1.0) * pausedDim)
+                .disabled(!entry.throughFader)
+                .opacity((entry.isMuted ? 0.55 : 1.0) * pausedDim * bypassDim)
             } else {
                 routeCard(routeUIDs)
             }
@@ -83,6 +88,9 @@ struct AppRowView: View {
         )
         .animation(.easeOut(duration: 0.2), value: app.isPlaying)
         .contextMenu {
+            Button(entry.throughFader ? "Bypass Fader" : "Play through Fader") {
+                engine.setThroughFader(!entry.throughFader, for: app)
+            }
             Button("Reset to 100%") { engine.reset(app) }
             if !engine.routeUIDs(for: app).isEmpty {
                 Button("Play on default output") { engine.clearRoute(for: app) }
@@ -147,6 +155,21 @@ struct AppRowView: View {
         )
         .disabled(!volume.canSetVolume)
         .opacity(volume.canSetVolume ? 1.0 : 0.4)
+    }
+
+    /// Toggles whether the app plays through Fader. Lit while it does; a
+    /// routed app needs Fader for its route, so the toggle is fixed on.
+    private func throughFaderButton(_ entry: AppVolume) -> some View {
+        Button {
+            engine.setThroughFader(!entry.throughFader, for: app)
+        } label: {
+            Image(systemName: entry.throughFader ? "waveform.circle.fill" : "waveform.circle")
+                .font(.system(size: 13))
+                .foregroundStyle(entry.throughFader ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.secondary))
+        }
+        .buttonStyle(.plain)
+        .disabled(!entry.outputDeviceUIDs.isEmpty)
+        .help(entry.throughFader ? "Playing through Fader — click to bypass" : "Bypassed — click to play through Fader")
     }
 
     private func sliderIcon(_ entry: AppVolume) -> String {
